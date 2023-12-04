@@ -14,7 +14,7 @@ import pygame
 
 
 class RoboticArmEnv(gym.Env):
-    def __init__(self, render=False, random_target=False, *args, **kwargs):
+    def __init__(self, render=False, random_target=False, seed=None, *args, **kwargs):
         pygame.init()
 
         self.theta_dim = 3
@@ -23,9 +23,10 @@ class RoboticArmEnv(gym.Env):
 
         self.random_target = random_target
 
-        self.threshold = 10  # 5   1, 0.1  could try 0.5, 0.05, etc.
+        self.threshold = 5 # 1, 0.1  could try 0.5, 0.05, etc.
 
         self.theta = np.zeros(self.theta_dim)
+        self.theta = np.zeros(self.theta_dim) # Angular vel. infos
 
         self.max_steps = 50
         self.current_step = 1
@@ -40,15 +41,15 @@ class RoboticArmEnv(gym.Env):
 
         self.reward = 0
         self.prev_distance = 0
+        self.prev_action = np.zeros(self.theta_dim) # keeps track of prev. actions/theta for obs_space
 
         # Define joint limit angles
         self.joint_min_angles = [-np.pi, -np.pi, -np.pi]
         self.joint_max_angles = [np.pi, np.pi, np.pi]
 
-        self.observation_space = Box(low=np.array([-np.inf] * 9), high=np.array([np.inf] * 9), dtype=np.float32)
-
+        # Obs_space: joint angles, joint velocities, end effector position, target position,and screen center
+        self.observation_space = Box(low=np.array([-np.inf] * 12), high=np.array([np.inf] * 12), dtype=np.float32)
         self.action_space = Box(low=np.array([-1, -1, -1]), high=np.array([1, 1, 1]), dtype=np.float32)
-        self.info = {}
 
         # Initialize rendering based on the user's choice
         self.render_enabled = render
@@ -66,20 +67,37 @@ class RoboticArmEnv(gym.Env):
              self.get_end_effector_position(),
              self.target, [self.width // 2, self.height // 2]])
 
+    """
+    def reset(self, *, seed=None, options=None):
+        self.theta = np.random.uniform(self.theta_low, self.theta_high, size=self.theta_dim)
+        self.current_step = 0
+        self.reward = 0
+
+        if not self.random_target:
+            # Do nothing, keep the existing target
+            pass
+        else:
+            self.target = self.get_target()
+
+        self.prev_distance = np.linalg.norm(self.get_end_effector_position() - self.target)
+        print(f'self.get_observation(): {self.get_observation()}')
+        return self.get_observation() # {}   Return an additional info dict (empty dict in this case)
+
+    """
     def reset(self):
-        self.theta = [0.0, 0.0, 0.0]  # np.random.uniform(self.theta_low, self.theta_high, size=self.theta_dim)
+        self.theta = np.random.uniform(self.theta_low, self.theta_high, size=self.theta_dim)
         self.current_step = 1
         self.reward = 0
 
         if not self.random_target:
             # Do nothing, keep the existing target
             pass
-
         else:
             self.target = self.get_target()
 
         self.prev_distance = np.linalg.norm(self.get_end_effector_position() - self.target)
         return self.get_observation()
+
 
     def get_target(self):
         max_arm_length = self.theta_dim * 100
@@ -100,6 +118,18 @@ class RoboticArmEnv(gym.Env):
                 joint_penalties[i] = -0.1 * (self.theta[i] - self.joint_max_angles[i])
         return joint_penalties
 
+    def get_reward(self, curr_distance, action, joint_penalties):
+        # reward_distance1 = self.prev_distance - curr_distance
+        reward_distance = -curr_distance
+        reward_control = -0.1 * np.square(action).sum()
+        reward = reward_distance + reward_control # + reward_distance1
+        reward += np.sum(joint_penalties)
+
+        # Scale down the reward
+        reward_scale = 0.01  # Adjust this scaling factor as needed
+        reward *= reward_scale
+        return reward
+
     def is_done(self, curr_distance):
         return curr_distance <= self.threshold or self.current_step == self.max_steps
 
@@ -107,13 +137,14 @@ class RoboticArmEnv(gym.Env):
         control_input = np.clip(action, -1, 1)
 
         # Calculate joint penalties based on the current joint angles
-        # joint_penalties = self.calculate_joint_penalties()
+        joint_penalties = self.calculate_joint_penalties()
+
         for i in range(self.theta_dim):
             self.theta[i] += control_input[i]
-            # self.theta[i] = np.clip(self.theta[i], self.joint_min_angles[i], self.joint_max_angles[i])
+            self.theta[i] = np.clip(self.theta[i], self.joint_min_angles[i], self.joint_max_angles[i])
+
         curr_distance = np.linalg.norm(self.get_end_effector_position() - self.target)
-        self.info = {'endeffector_position': self.get_end_effector_position(), 'target_position': self.target}
-        reward = - curr_distance
+        reward = self.get_reward(curr_distance, action, joint_penalties)
 
         done = self.is_done(curr_distance)
 
@@ -121,20 +152,24 @@ class RoboticArmEnv(gym.Env):
         self.prev_distance = curr_distance
         self.current_step += 1
 
+        # obs = np.array(self.get_observation(), dtype=np.float64)
+
         obs = self.get_observation()
 
         # Render if enabled
         if self.render_enabled:
             self.render()
 
-        return obs, reward, done, self.info, {}
+        return obs, reward, done, {}
 
     def get_end_effector_position(self):
         x = self.width // 2
         y = self.height // 2
-        for angle in range(len(self.theta)):
-            x += 100 * np.cos(np.sum(self.theta[:angle + 1]))
-            y += 100 * np.sin(np.sum(self.theta[:angle + 1]))
+        for angle in self.theta:
+            x += 100 * np.cos(angle)
+            y += 100 * np.sin(angle)
+        #return np.array([x, y], dtype=np.float32)
+
         return np.array([x, y])
 
     def render(self):
@@ -180,29 +215,6 @@ class RoboticArmEnv(gym.Env):
     def close(self):
         pygame.quit()
         self.render_screen = None
-env = RoboticArmEnv(render=True, random_target=False)
-if __name__ == "__main__":
-    env = RoboticArmEnv(render=True, random_target=False)
-    print(env.observation_space)
-    print(f'obs_space: {env.observation_space}, act_space: {env.action_space}')
 
-    # Main loop
-    for episode in range(10):
-        env.reset()
-        total_reward = 0
-
-        for i in range(2):  # You can set a different episode length if needed
-            action = [-0.2, 0.3, 0.5] #env.action_space.sample()
-            #print(f'action_sam: {action}')
-            obs, reward, done, info, _ = env.step(action)
-            print(f'step: {i}, obs: {obs}, reward: {reward}, done: {done}, info: {info}')
-            total_reward += reward
-            if done:
-                break
-
-        print(f"Episode {episode + 1}, Total Reward: {total_reward}")
-
-    env.close()
-
-
-
+env = RoboticArmEnv(render=False, random_target=False)
+print(env.observation_space, env.action_space)
